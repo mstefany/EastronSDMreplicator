@@ -1,0 +1,47 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "PlatformIO",
+			"task": "Upload and Monitor",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"label": "PlatformIO: Upload and Monitor"
+		},
+		{
+			"type": "PlatformIO",
+			"task": "Build",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build",
+			"label": "PlatformIO: Build"
+		},
+		{
+			"type": "PlatformIO",
+			"task": "Remote Upload",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"label": "PlatformIO: Remote Upload"
+		},
+		{
+			"type": "PlatformIO",
+			"task": "Build Filesystem Image (nodemcu-32s)",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build",
+			"label": "PlatformIO: Build Filesystem Image (nodemcu-32s)"
+		},
+		{
+			"type": "PlatformIO",
+			"task": "Upload Filesystem Image OTA (nodemcu-32s)",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"label": "PlatformIO: Upload Filesystem Image OTA (nodemcu-32s)"
+		}
+	]
+}
