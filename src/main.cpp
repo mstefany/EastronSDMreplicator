@@ -11,15 +11,24 @@
 #include <secret.h>
 
 // https://support.innon.com/PowerMeters/SDM630-MOD-MID/Manual/SDM630-Modbus_Protocol.pdf
-#define EASTRON_SLAVE_ID 2
+#define EASTRON_SERVER_ID 2
 #define EASTRON_RX_TX_PIN 5
 #define EASTRON_RX_PIN 18
 #define EASTRON_TX_PIN 19
-#define INFINISOLAR_SLAVE_ID 2
+#define INFINISOLAR_SERVER_ID 2
 #define INFINISOLAR_RX_TX_PIN 21
 #define INFINISOLAR_RX_PIN 22
 #define INFINISOLAR_TX_PIN 23
-#define EASTRON_NUM_REGS 382
+
+#define EASTRON_REG_COUNT 382
+#define LOCAL_REG_COUNT 10
+#define LOCAL_REG_START 10000
+#define LOCAL_REG_GRIDOVERFLOW 10000
+#define LOCAL_REG_GRIDIMPORT 10004
+#define LOCAL_REG_GRIDEXPORT 10005
+#define LOCAL_REG_SSRPOWER 10001
+#define LOCAL_REG_DUTYCYCLE 10002
+#define LOCAL_REG_MANUALCONTROL 10003
 
 #define PWM1_GPIO 33
 #define PWM1_CH 0
@@ -28,9 +37,6 @@
 
 #define WIFI_TIMEOUT_MS 10000
 
-#define SYSLOG_SERVER "192.168.2.3"
-#define SYSLOG_PORT 514
-#define DEVICE_HOSTNAME "sdm-replicator-7c9ebd4598b8"
 #define APP_NAME "sdm-replicator"
 
 #define MIN_PWM_POWER 200 // do not send less than 200 W
@@ -58,8 +64,8 @@ TaskHandle_t espTaskHandle = NULL;
 TaskHandle_t otaTaskHandle = NULL;
 TaskHandle_t pwmTaskHandle = NULL;
 
-int16_t outPower = 0;
-int16_t outPowerLast = 0;
+int16_t ssrPower = 0;
+int16_t ssrPowerLast = 0;
 uint16_t dutyCycle = 0;
 
 union 
@@ -93,20 +99,24 @@ bool cbSomebodyConnected(IPAddress ip) {
   return true;
 }
 
-int calculateDutyCycle(int desiredPower) {
-  double percentage = desiredPower / MAX_PWM_POWER;
+int calculateDutyCycle(int16_t desiredPower) {
+  if (desiredPower >= MAX_PWM_POWER) {
+    return pow(2, PWM1_RES);
+  }
+
+  double percentage = (double)desiredPower / (double)MAX_PWM_POWER;
   double fullArea = 2;
   double desiredArea = fullArea * percentage;
 
-  double pwmResolution = pow(2, PWM1_RES);
+  int pwmResolution = pow(2, PWM1_RES);
 
   double width = PI / pwmResolution; // rectangular width for integral approximation
 
   double accumulated = 0;
   for (int i = 1; i < pwmResolution; i++) {
-    accumulated += width * sin(width);
+    accumulated += width * sin(i * width);
 
-    if (int(round(accumulated)) >= desiredArea) {
+    if (accumulated >= desiredArea) {
       return i - 1;
     }
   }
@@ -115,8 +125,26 @@ int calculateDutyCycle(int desiredPower) {
 }
 
 uint16_t cbRead(TRegister* reg, uint16_t val) {
-  Serial.print("Read. Reg RAW#: ");
+  Serial.print("Read RAW#: ");
   Serial.println(reg->address.address);
+  return val;
+}
+
+uint16_t cbWriteCoil(TRegister* reg, uint16_t val) {
+  Serial.print("Write Coil RAW#: ");
+  Serial.println(reg->address.address);
+  Serial.print("Value:");
+  Serial.println(COIL_BOOL(val));
+
+  return val;
+}
+
+uint16_t cbWriteHolding(TRegister* reg, uint16_t val) {
+  Serial.print("Write Holding RAW#: ");
+  Serial.println(reg->address.address);
+  Serial.print("Value:");
+  Serial.println(val);
+
   return val;
 }
 
@@ -174,7 +202,7 @@ void eastronTask(void *pvParameters) {
   // Modbus RTU to power meter
   EastronSerial.begin(19200, SERIAL_8N1, EASTRON_RX_PIN, EASTRON_TX_PIN);
   EastronModbus.begin(&EastronSerial, EASTRON_RX_TX_PIN);
-  EastronModbus.master();
+  EastronModbus.client();
 
   if (infiniTaskHandle) {
     xTaskNotifyGive(infiniTaskHandle);
@@ -185,36 +213,37 @@ void eastronTask(void *pvParameters) {
   }
 
   for(;;) {
-    if (!EastronModbus.slave()) {
-      EastronModbus.pullIreg(EASTRON_SLAVE_ID, 0, 0, 80);
-      while(EastronModbus.slave()) {
+    if (!EastronModbus.server()) {
+      EastronModbus.pullIreg(EASTRON_SERVER_ID, 0, 0, 64);
+      while(EastronModbus.server()) {
         EastronModbus.task();
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
 
-      EastronModbus.pullIreg(EASTRON_SLAVE_ID, 80, 80, 26);
-      while(EastronModbus.slave()) {
+      EastronModbus.pullIreg(EASTRON_SERVER_ID, 64, 64, 64);
+      while(EastronModbus.server()) {
         EastronModbus.task();
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
 
-      EastronModbus.pullIreg(EASTRON_SLAVE_ID, 200, 200, 8);
-      while(EastronModbus.slave()) {
+      EastronModbus.pullIreg(EASTRON_SERVER_ID, 200, 200, 8);
+      while(EastronModbus.server()) {
+        EastronModbus.task();
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+      }
+      /*
+      EastronModbus.pullIreg(EASTRON_SERVER_ID, 224, 224, 46);
+      while(EastronModbus.server()) {
         EastronModbus.task();
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
 
-      EastronModbus.pullIreg(EASTRON_SLAVE_ID, 224, 224, 46);
-      while(EastronModbus.slave()) {
+      EastronModbus.pullIreg(EASTRON_SERVER_ID, 334, 334, 48);
+      while(EastronModbus.server()) {
         EastronModbus.task();
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
-
-      EastronModbus.pullIreg(EASTRON_SLAVE_ID, 334, 334, 48);
-      while(EastronModbus.slave()) {
-        EastronModbus.task();
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-      }
+      */
     }
     vTaskDelay(500 / portTICK_PERIOD_MS);
   }
@@ -233,9 +262,8 @@ void infiniTask(void *pvParameters) {
   // Modbus RTU to inverter
   InfiniSolarSerial.begin(19200, SERIAL_8N1, INFINISOLAR_RX_PIN, INFINISOLAR_TX_PIN);
   InfinisolarModbus.begin(&InfiniSolarSerial, INFINISOLAR_RX_TX_PIN);
-  InfinisolarModbus.slave(INFINISOLAR_SLAVE_ID);
-  InfinisolarModbus.addIreg(0, 0, EASTRON_NUM_REGS);
-  //InfinisolarModbus.onGetIreg(0, cbRead, EASTRON_NUM_REGS);
+  InfinisolarModbus.server(INFINISOLAR_SERVER_ID);
+  InfinisolarModbus.addIreg(0, 0, EASTRON_REG_COUNT);
 
   for(;;) {
     InfinisolarModbus.task();
@@ -256,8 +284,13 @@ void mbServerTask(void *pvParameters) {
   // Modbus IP for HA
   EspModbus.onConnect(cbSomebodyConnected);
   EspModbus.server();
-  EspModbus.addIreg(0, 0, EASTRON_NUM_REGS);
-  EspModbus.addIreg(10000, 0, 10);
+  EspModbus.addIreg(0, 0, EASTRON_REG_COUNT);
+  EspModbus.addIreg(LOCAL_REG_START, 0, LOCAL_REG_COUNT);
+  EspModbus.addHreg(LOCAL_REG_START, 0, LOCAL_REG_COUNT);
+  EspModbus.addCoil(LOCAL_REG_START, false, LOCAL_REG_COUNT);
+
+  // EspModbus.onSetCoil(LOCAL_REG_MANUALCONTROL, cbWriteCoil, 1);
+  // EspModbus.onSetHreg(LOCAL_REG_SSRPOWER, cbWriteHolding, 1);
 
   for(;;) {
     EspModbus.task();
@@ -346,89 +379,105 @@ void pwmTask(void *pvParameters) {
   vTaskDelay(1000 / portTICK_PERIOD_MS);
 
   for(;;) {
-    power1.x = (((unsigned long)EastronModbus.Ireg(12) << 16) | EastronModbus.Ireg(13));
-    float p1 = power1.f;
-    Serial.print("Current L1 power: ");
-    Serial.println(p1);
-    if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Current L1 power: %f", p1);
-    }
+    if (EspModbus.Coil(LOCAL_REG_MANUALCONTROL)) {
+      Serial.println("Manual control enabled, skipping calculations");
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Manual control enabled, skipping calculations");
+      }
 
-    power2.x = (((unsigned long)EastronModbus.Ireg(14) << 16) | EastronModbus.Ireg(15));
-    float p2 = power2.f;
-    Serial.print("Current L2 power: ");
-    Serial.println(p2);
-    if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Current L2 power: %f", p2);
-    }
-
-    power3.x = (((unsigned long)EastronModbus.Ireg(16) << 16) | EastronModbus.Ireg(17));
-    float p3 = power3.f;
-    Serial.print("Current L3 power: ");
-    Serial.println(p3);
-    if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Current L3 power: %f", p3);
-    }
-
-    // let's calculate how much we're exporting to grid or importing
-    float_t gridOverflow = p1 + p2 + p3;
-    EastronModbus.Ireg(10000, int(round(gridOverflow)));
-
-    float gridImport = 0;
-    float gridExport = 0;
-    if (gridOverflow >= 0) {
-      gridImport = round(gridOverflow);
+      ssrPower = EspModbus.Hreg(LOCAL_REG_SSRPOWER);
     } else {
-      gridExport = round(gridOverflow * -1);
+      power1.x = (((unsigned long)EastronModbus.Ireg(12) << 16) | EastronModbus.Ireg(13));
+      float p1 = power1.f;
+      Serial.print("Current L1 power: ");
+      Serial.println(p1);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current L1 power: %f", p1);
+      }
+
+      power2.x = (((unsigned long)EastronModbus.Ireg(14) << 16) | EastronModbus.Ireg(15));
+      float p2 = power2.f;
+      Serial.print("Current L2 power: ");
+      Serial.println(p2);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current L2 power: %f", p2);
+      }
+
+      power3.x = (((unsigned long)EastronModbus.Ireg(16) << 16) | EastronModbus.Ireg(17));
+      float p3 = power3.f;
+      Serial.print("Current L3 power: ");
+      Serial.println(p3);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current L3 power: %f", p3);
+      }
+
+      // let's calculate how much we're exporting to grid or importing
+      float_t gridOverflow = p1 + p2 + p3;
+      EspModbus.Ireg(LOCAL_REG_GRIDOVERFLOW, int(round(gridOverflow)));
+
+      float gridImport = 0;
+      float gridExport = 0;
+      if (gridOverflow >= 0) {
+        gridImport = round(gridOverflow);
+      } else {
+        gridExport = round(gridOverflow * -1);
+      }
+
+      Serial.print("Current gridImport: ");
+      Serial.println(gridImport);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current gridImport: %f", gridImport);
+      }
+      EspModbus.Ireg(LOCAL_REG_GRIDIMPORT, int(gridImport));
+
+      Serial.print("Current gridExport: ");
+      Serial.println(gridExport);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current gridExport: %f", gridExport);
+      }
+      EspModbus.Ireg(LOCAL_REG_GRIDEXPORT, int(gridExport));
+
+      // if we're sending something, redirect it to heating body
+      if (gridImport > 0) {
+        ssrPower -= int(gridImport);
+      } else if (gridExport > 0) {
+        ssrPower += int(gridExport);
+      }
     }
 
-    Serial.print("Current gridImport: ");
-    Serial.println(gridImport);
+    if (ssrPower > MAX_PWM_POWER) {
+      ssrPower = MAX_PWM_POWER;
+    }
+    if (ssrPower < 0) {
+      ssrPower = 0;
+    }
+    Serial.print("Setting ssrPower to: ");
+    Serial.println(ssrPower);
     if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Current gridImport: %f", gridImport);
+      syslog.logf(LOG_INFO, "Setting ssrPower to: %d", ssrPower);
     }
-    EastronModbus.Ireg(10004, int(gridImport));
+    EspModbus.Ireg(LOCAL_REG_SSRPOWER, ssrPower);
 
-    Serial.print("Current gridExport: ");
-    Serial.println(gridExport);
-    if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Current gridExport: %f", gridExport);
-    }
-    EastronModbus.Ireg(10005, int(gridExport));
-
-    // if we're sending something, redirect it to heating body
-    if (gridImport > 0) {
-      outPower -= int(gridImport);
-    } else if (gridExport > 0) {
-      outPower += int(gridExport);
-    }
-    if (outPower > MAX_PWM_POWER) {
-      outPower = MAX_PWM_POWER;
-    }
-    if (outPower < 0) {
-      outPower = 0;
-    }
-    Serial.print("Setting outPower to: ");
-    Serial.println(outPower);
-    if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Setting outPower to: %d", outPower);
-    }
-    EastronModbus.Ireg(10001, outPower);
-
-    if (outPower < MIN_PWM_POWER) {
+    if (ssrPower < MIN_PWM_POWER) {
+      Serial.println("ssrPower too low, setting 0 instead");
       dutyCycle = 0;
-      outPowerLast = 0;
-    } else if (abs(outPower - outPowerLast) > MIN_PWM_DIFF) {
-      dutyCycle = calculateDutyCycle(outPower);
-      outPowerLast = outPower;
+      ssrPowerLast = 0;
+    } else if (abs(ssrPower - ssrPowerLast) > MIN_PWM_DIFF) {
+      Serial.println("Diff in ssrPower higher than threshold, setting new value");
+      dutyCycle = calculateDutyCycle(ssrPower);
+      ssrPowerLast = ssrPower;
+    } else {
+      Serial.println("No change to ssrPower");
     }
+    Serial.print("Setting ssrPowerLast to: ");
+    Serial.println(ssrPowerLast);
 
     Serial.print("Setting dutyCycle to: ");
     Serial.println(dutyCycle);
     if (WiFi.status() == WL_CONNECTED) {
       syslog.logf(LOG_INFO, "Setting dutyCycle to: %d", dutyCycle);
     }
-    EastronModbus.Ireg(10002, outPower);
+    EspModbus.Ireg(LOCAL_REG_DUTYCYCLE, dutyCycle);
 
     ledcWrite(PWM1_CH, dutyCycle);
 
