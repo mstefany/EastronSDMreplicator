@@ -32,21 +32,29 @@
 
 #define PWM1_GPIO 33
 #define PWM1_CH 0
-#define PWM1_RES 10
-#define PWM1_FREQ 10
+#define PWM1_RES 15 // Resolution 8, 10, 12, 15
+#define PWM1_FREQ 5 // Hz
+#define GRID_FREQ 50 // Hz
 
 #define WIFI_TIMEOUT_MS 10000
 
 #define APP_NAME "sdm-replicator"
 
-#define MIN_PWM_POWER 200 // do not send less than 200 W
-#define MAX_PWM_POWER 1775 // this should be measured before
-#define MIN_PWM_DIFF 100 // do not act on small changes
+//#define PWM_POWER_STEP 87 // Martin
+#define PWM_POWER_STEP 89 // David
+//#define MAX_PWM_POWER 1740 // Martin
+#define MAX_PWM_POWER 1780 // David, 20 * PWM_POWER_STEP
 
-IPAddress esp_ip(192, 168, 2, 15);
 IPAddress esp_mask(255, 255, 255, 0);
+/* Martin
+IPAddress esp_ip(192, 168, 2, 15);
 IPAddress esp_gw(192, 168, 2, 1);
 IPAddress esp_dns1(192, 168, 2, 1);
+*/
+/* David */
+IPAddress esp_ip(192, 168, 1, 12);
+IPAddress esp_gw(192, 168, 1, 1);
+IPAddress esp_dns1(192, 168, 1, 1);
 
 HardwareSerial EastronSerial(1);
 HardwareSerial InfiniSolarSerial(2);
@@ -57,7 +65,7 @@ ModbusIP EspModbus;
 
 WiFiUDP udpClient;
 
-Syslog syslog(udpClient, SYSLOG_SERVER, SYSLOG_PORT, DEVICE_HOSTNAME, APP_NAME, LOG_KERN);
+Syslog syslog(udpClient, SYSLOG_SERVER, SYSLOG_PORT, DEVICE_HOSTNAME, APP_NAME, LOG_LOCAL3);
 
 TaskHandle_t infiniTaskHandle = NULL;
 TaskHandle_t espTaskHandle = NULL;
@@ -65,7 +73,7 @@ TaskHandle_t otaTaskHandle = NULL;
 TaskHandle_t pwmTaskHandle = NULL;
 
 int16_t ssrPower = 0;
-int16_t ssrPowerLast = 0;
+uint16_t ssrPowerNearest = 0;
 uint16_t dutyCycle = 0;
 
 union 
@@ -99,29 +107,18 @@ bool cbSomebodyConnected(IPAddress ip) {
   return true;
 }
 
-int calculateDutyCycle(int16_t desiredPower) {
+int calculateDutyCycle(uint16_t desiredPower) {
+  int pwm_max = pow(2, PWM1_RES) - 1;
   if (desiredPower >= MAX_PWM_POWER) {
-    return pow(2, PWM1_RES);
+    return pwm_max;
   }
 
-  double percentage = (double)desiredPower / (double)MAX_PWM_POWER;
-  double fullArea = 2;
-  double desiredArea = fullArea * percentage;
+  int multiple = desiredPower / PWM_POWER_STEP;
+  int max = MAX_PWM_POWER / PWM_POWER_STEP;
+  double pwm_width = (double)multiple / (double)max;
 
-  int pwmResolution = pow(2, PWM1_RES);
-
-  double width = PI / pwmResolution; // rectangular width for integral approximation
-
-  double accumulated = 0;
-  for (int i = 1; i < pwmResolution; i++) {
-    accumulated += width * sin(i * width);
-
-    if (accumulated >= desiredArea) {
-      return i - 1;
-    }
-  }
-
-  return 0; // should not ever reach
+  int final_pwm = round(pwm_width * pwm_max);
+  return final_pwm;
 }
 
 uint16_t cbRead(TRegister* reg, uint16_t val) {
@@ -372,9 +369,10 @@ void pwmTask(void *pvParameters) {
 
   Serial.println("Unblocked pwmTask twice");
 
-  ledcAttachPin(PWM1_GPIO, PWM1_CH);
+  pinMode(PWM1_GPIO, OUTPUT);
   ledcSetup(PWM1_CH, PWM1_FREQ, PWM1_RES);
-  ledcWrite(PWM1_CH, 0);
+  ledcAttachPin(PWM1_GPIO, PWM1_CH);
+  ledcWrite(PWM1_CH, 0); // reset PWM on start
 
   vTaskDelay(1000 / portTICK_PERIOD_MS);
 
@@ -451,37 +449,37 @@ void pwmTask(void *pvParameters) {
     if (ssrPower < 0) {
       ssrPower = 0;
     }
-    Serial.print("Setting ssrPower to: ");
+    Serial.print("Got ssrPower: ");
     Serial.println(ssrPower);
     if (WiFi.status() == WL_CONNECTED) {
-      syslog.logf(LOG_INFO, "Setting ssrPower to: %d", ssrPower);
+      syslog.logf(LOG_INFO, "Got ssrPower: %d", ssrPower);
     }
-    EspModbus.Ireg(LOCAL_REG_SSRPOWER, ssrPower);
 
-    if (ssrPower < MIN_PWM_POWER) {
-      Serial.println("ssrPower too low, setting 0 instead");
-      dutyCycle = 0;
-      ssrPowerLast = 0;
-    } else if (abs(ssrPower - ssrPowerLast) > MIN_PWM_DIFF) {
-      Serial.println("Diff in ssrPower higher than threshold, setting new value");
-      dutyCycle = calculateDutyCycle(ssrPower);
-      ssrPowerLast = ssrPower;
-    } else {
-      Serial.println("No change to ssrPower");
+    ssrPowerNearest = ssrPower / PWM_POWER_STEP * PWM_POWER_STEP;
+    Serial.print("Setting actual ssrPower to: ");
+    Serial.println(ssrPowerNearest);
+    if (WiFi.status() == WL_CONNECTED) {
+      syslog.logf(LOG_INFO, "Setting actual ssrPower to: %d", ssrPowerNearest);
     }
-    Serial.print("Setting ssrPowerLast to: ");
-    Serial.println(ssrPowerLast);
+    bool result = EspModbus.Ireg(LOCAL_REG_SSRPOWER, ssrPowerNearest);
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!result) syslog.logf(LOG_INFO, "Writing ssrPower failed");
+    }
 
+    dutyCycle = calculateDutyCycle(ssrPowerNearest);
     Serial.print("Setting dutyCycle to: ");
     Serial.println(dutyCycle);
     if (WiFi.status() == WL_CONNECTED) {
       syslog.logf(LOG_INFO, "Setting dutyCycle to: %d", dutyCycle);
     }
-    EspModbus.Ireg(LOCAL_REG_DUTYCYCLE, dutyCycle);
+    result = EspModbus.Ireg(LOCAL_REG_DUTYCYCLE, dutyCycle);
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!result) syslog.logf(LOG_INFO, "Writing dutyCycle failed");
+    }
 
     ledcWrite(PWM1_CH, dutyCycle);
 
-    vTaskDelay(15000 / portTICK_PERIOD_MS);
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
   }
 }
 
