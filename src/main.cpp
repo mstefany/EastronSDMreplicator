@@ -23,9 +23,10 @@
 #define EASTRON_REG_COUNT 382
 #define LOCAL_REG_COUNT 10
 #define LOCAL_REG_START 10000
-#define LOCAL_REG_GRIDOVERFLOW 10000
+#define LOCAL_REG_GRIDIMPORTEXPORT 10000
 #define LOCAL_REG_GRIDIMPORT 10004
 #define LOCAL_REG_GRIDEXPORT 10005
+#define LOCAL_REG_GRIDEXPORT_OFFSET 10006
 #define LOCAL_REG_SSRPOWER 10001
 #define LOCAL_REG_DUTYCYCLE 10002
 #define LOCAL_REG_MANUALCONTROL 10003
@@ -44,17 +45,18 @@
 #define PWM_POWER_STEP 89 // David
 //#define MAX_PWM_POWER 1740 // Martin
 #define MAX_PWM_POWER 1780 // David, 20 * PWM_POWER_STEP
+#define SSR_POWER_OFFSET 100 // InfiniSolar does not balance to perfection
 
 IPAddress esp_mask(255, 255, 255, 0);
-/* Martin
+/* Martin */
 IPAddress esp_ip(192, 168, 2, 15);
 IPAddress esp_gw(192, 168, 2, 1);
 IPAddress esp_dns1(192, 168, 2, 1);
-*/
-/* David */
+/* David
 IPAddress esp_ip(192, 168, 1, 12);
 IPAddress esp_gw(192, 168, 1, 1);
 IPAddress esp_dns1(192, 168, 1, 1);
+*/
 
 HardwareSerial EastronSerial(1);
 HardwareSerial InfiniSolarSerial(2);
@@ -76,23 +78,25 @@ int16_t ssrPower = 0;
 uint16_t ssrPowerNearest = 0;
 uint16_t dutyCycle = 0;
 
-union 
-{
+union {
   uint32_t x;
   float f;
 } power1;
 
-union 
-{
+union {
   uint32_t x;
   float f;
 } power2;
 
-union 
-{
+union {
   uint32_t x;
   float f;
 } power3;
+
+union {
+  uint32_t x;
+  float f;
+} totalpower;
 
 bool cbSomebodyConnected(IPAddress ip) {
   Serial.print("New TCP client connected: ");
@@ -409,37 +413,57 @@ void pwmTask(void *pvParameters) {
         syslog.logf(LOG_INFO, "Current L3 power: %f", p3);
       }
 
-      // let's calculate how much we're exporting to grid or importing
-      float_t gridOverflow = p1 + p2 + p3;
-      EspModbus.Ireg(LOCAL_REG_GRIDOVERFLOW, int(round(gridOverflow)));
+      totalpower.x = (((unsigned long)EastronModbus.Ireg(52) << 16) | EastronModbus.Ireg(53));
+      float tp = totalpower.f;
+      Serial.print("Current total power: ");
+      Serial.println(tp);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current total power: %f", tp);
+      }
 
-      float gridImport = 0;
-      float gridExport = 0;
-      if (gridOverflow >= 0) {
-        gridImport = round(gridOverflow);
+      int16_t gridImportExport = int(round(tp));
+      uint16_t gridImport = 0;
+      uint16_t gridExport = 0;
+      uint16_t gridExportOffset = 0;
+
+      if (gridImportExport >= 0) {
+        gridImport = gridImportExport;
       } else {
-        gridExport = round(gridOverflow * -1);
+        gridExport = gridImportExport * -1;
       }
 
       Serial.print("Current gridImport: ");
       Serial.println(gridImport);
       if (WiFi.status() == WL_CONNECTED) {
-        syslog.logf(LOG_INFO, "Current gridImport: %f", gridImport);
+        syslog.logf(LOG_INFO, "Current gridImport: %d", gridImport);
       }
       EspModbus.Ireg(LOCAL_REG_GRIDIMPORT, int(gridImport));
 
       Serial.print("Current gridExport: ");
       Serial.println(gridExport);
       if (WiFi.status() == WL_CONNECTED) {
-        syslog.logf(LOG_INFO, "Current gridExport: %f", gridExport);
+        syslog.logf(LOG_INFO, "Current gridExport: %d", gridExport);
       }
       EspModbus.Ireg(LOCAL_REG_GRIDEXPORT, int(gridExport));
 
-      // if we're sending something, redirect it to heating body
+      // adjust gridExport by offset
+      if (gridExport >= SSR_POWER_OFFSET) {
+        gridExportOffset -= SSR_POWER_OFFSET;
+      } else {
+        gridExportOffset = 0;
+      }
+      Serial.print("Current gridExportOffset: ");
+      Serial.println(gridExportOffset);
+      if (WiFi.status() == WL_CONNECTED) {
+        syslog.logf(LOG_INFO, "Current gridExportOffset: %d", gridExportOffset);
+      }
+      EspModbus.Ireg(LOCAL_REG_GRIDEXPORT_OFFSET, gridExportOffset);
+
+      // if we're exporting something, redirect it to heating body
       if (gridImport > 0) {
-        ssrPower -= int(gridImport);
-      } else if (gridExport > 0) {
-        ssrPower += int(gridExport);
+        ssrPower -= gridImport;
+      } else if (gridExportOffset > 0) {
+        ssrPower += gridExportOffset;
       }
     }
 
