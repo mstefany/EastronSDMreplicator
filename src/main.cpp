@@ -448,7 +448,7 @@ void pwmTask(void *pvParameters) {
 
       // adjust gridExport by offset
       if (gridExport >= SSR_POWER_OFFSET) {
-        gridExportOffset -= SSR_POWER_OFFSET;
+        gridExportOffset = gridExport - SSR_POWER_OFFSET;
       } else {
         gridExportOffset = 0;
       }
